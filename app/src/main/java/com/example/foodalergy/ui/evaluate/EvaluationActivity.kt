@@ -2,16 +2,18 @@ package com.example.foodalergy.ui.evaluate
 
 import android.Manifest
 import android.content.Intent
-import android.content.SharedPreferences
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.view.View
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+
 import com.example.foodalergy.R
 import com.example.foodalergy.data.model.*
 import com.example.foodalergy.data.network.RetrofitClient
+import com.example.foodalergy.data.store.UserSessionManager
 import com.google.zxing.integration.android.IntentIntegrator
 import retrofit2.Call
 import retrofit2.Callback
@@ -25,7 +27,17 @@ class EvaluationActivity : AppCompatActivity() {
     private lateinit var btnEvaluate: Button
     private lateinit var textEvaluationResult: TextView
     private lateinit var btnDeleteScan: Button
+    private lateinit var progressBar: ProgressBar
+    private lateinit var imageViewProduct: ImageView
 
+    // Manual Entry
+    private lateinit var btnManualEntry: Button
+    private lateinit var manualEntryLayout: LinearLayout
+    private lateinit var editProductName: EditText
+    private lateinit var editBarcode: EditText
+    private lateinit var editProductText: EditText
+
+    private var isManualMode = false
     private var lastScanId: String? = null
     private var scannedProduct: ProductResponse? = null
 
@@ -36,33 +48,44 @@ class EvaluationActivity : AppCompatActivity() {
         setContentView(R.layout.activity_evaluation)
         title = "Évaluation des allergies"
 
+        // Init views
         editTextAllergies = findViewById(R.id.editTextAllergies)
         btnScan = findViewById(R.id.btnScan)
         textScanResult = findViewById(R.id.textScanResult)
         btnEvaluate = findViewById(R.id.btnEvaluate)
         textEvaluationResult = findViewById(R.id.textEvaluationResult)
         btnDeleteScan = findViewById(R.id.btnDeleteScan)
+        progressBar = findViewById(R.id.progressBar)
+        imageViewProduct = findViewById(R.id.imageViewProduct)
+
+        // Manual
+        btnManualEntry = findViewById(R.id.btnManualEntry)
+        manualEntryLayout = findViewById(R.id.manualEntryLayout)
+        editProductName = findViewById(R.id.editProductName)
+        editBarcode = findViewById(R.id.editBarcode)
+        editProductText = findViewById(R.id.editProductText)
 
         checkCameraPermission()
 
         btnScan.setOnClickListener { startQRScanner() }
-
         btnEvaluate.setOnClickListener { evaluateRisk() }
+        btnDeleteScan.setOnClickListener { lastScanId?.let { deleteScan(it) } }
 
-        btnDeleteScan.setOnClickListener {
-            lastScanId?.let { deleteScan(it) }
+        btnManualEntry.setOnClickListener {
+            isManualMode = !isManualMode
+            manualEntryLayout.visibility = if (isManualMode) View.VISIBLE else View.GONE
+            btnManualEntry.text = if (isManualMode) "Cancel Manual Entry" else getString(R.string.enter_product_manually)
+            if (!isManualMode) {
+                editProductName.text.clear()
+                editBarcode.text.clear()
+                editProductText.text.clear()
+            }
         }
     }
 
     private fun checkCameraPermission() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
-            != PackageManager.PERMISSION_GRANTED
-        ) {
-            ActivityCompat.requestPermissions(
-                this,
-                arrayOf(Manifest.permission.CAMERA),
-                CAMERA_PERMISSION_CODE
-            )
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), CAMERA_PERMISSION_CODE)
         }
     }
 
@@ -87,12 +110,14 @@ class EvaluationActivity : AppCompatActivity() {
 
     private fun getProductFromScan(scanId: String) {
         textScanResult.text = "Chargement du produit..."
+        imageViewProduct.setImageDrawable(null)
 
         RetrofitClient.scanApi.getScan(scanId).enqueue(object : Callback<ProductResponse> {
             override fun onResponse(call: Call<ProductResponse>, response: Response<ProductResponse>) {
                 if (response.isSuccessful && response.body() != null) {
                     scannedProduct = response.body()
                     textScanResult.text = "Produit : ${scannedProduct?.name ?: "Inconnu"}"
+
                     btnDeleteScan.visibility = Button.VISIBLE
                 } else {
                     textScanResult.text = "Produit introuvable"
@@ -106,64 +131,54 @@ class EvaluationActivity : AppCompatActivity() {
     }
 
     private fun evaluateRisk() {
-        val username = getUsernameFromPreferences()
-
-        if (username.isEmpty()) {
-            textEvaluationResult.text = "Nom d'utilisateur non trouvé"
+        val userId = UserSessionManager(this).getUserId()
+        if (userId.isEmpty()) {
+            textEvaluationResult.text = "ID utilisateur introuvable dans la session"
             return
         }
 
-        fetchUserId(username) { userId ->
-            if (userId == null) {
-                textEvaluationResult.text = "Impossible de récupérer l'ID utilisateur"
-                return@fetchUserId
-            }
-
-            val request = EvaluateRequest(
-
+        val request = if (isManualMode) {
+            EvaluateRequest(
+                productText = editProductText.text.toString(),
+                barcode = editBarcode.text.toString(),
+                productName = editProductName.text.toString()
+            )
+        } else {
+            EvaluateRequest(
                 productText = scannedProduct?.description ?: "",
                 barcode = scannedProduct?.barcode ?: "",
                 productName = scannedProduct?.name ?: ""
             )
-
-            RetrofitClient.scanApi.evaluate(request).enqueue(object : Callback<EvaluateResponse> {
-                override fun onResponse(call: Call<EvaluateResponse>, response: Response<EvaluateResponse>) {
-                    if (response.isSuccessful && response.body() != null) {
-                        val result = response.body()
-                        textEvaluationResult.text =
-                            "Statut : ${result?.status}\nRisque : ${result?.level}\nDétails : ${result?.details}"
-                    } else {
-                        textEvaluationResult.text = "Erreur d’évaluation"
-                    }
-                }
-
-                override fun onFailure(call: Call<EvaluateResponse>, t: Throwable) {
-                    textEvaluationResult.text = "Échec : ${t.message}"
-                }
-            })
         }
-    }
 
-    private fun fetchUserId(username: String, callback: (String?) -> Unit) {
-        RetrofitClient.authApi.getUserByUsername(username)
-            .enqueue(object : Callback<User> {
-                override fun onResponse(call: Call<User>, response: Response<User>) {
-                    if (response.isSuccessful && response.body() != null) {
-                        callback(response.body()!!.id)
-                    } else {
-                        callback(null)
-                    }
+        // UI loading state
+        btnEvaluate.isEnabled = false
+        progressBar.visibility = View.VISIBLE
+        textEvaluationResult.text = "Évaluation en cours..."
+
+        RetrofitClient.scanApi.evaluate(request).enqueue(object : Callback<EvaluateResponse> {
+            override fun onResponse(call: Call<EvaluateResponse>, response: Response<EvaluateResponse>) {
+                btnEvaluate.isEnabled = true
+                progressBar.visibility = View.GONE
+                if (response.isSuccessful && response.body() != null) {
+                    val result = response.body()
+                    textEvaluationResult.text = """
+                        🧾 Produit : ${result?.productName}
+                        ⚠️ Risque : ${result?.riskLevel}
+                        🧪 Source : ${result?.source}
+                        🚨 Allergènes détectés : ${result?.allergens?.joinToString(", ") ?: "Aucun"}
+                    """.trimIndent()
+                } else {
+                    textEvaluationResult.text = "Erreur d’évaluation"
                 }
+            }
 
-                override fun onFailure(call: Call<User>, t: Throwable) {
-                    callback(null)
-                }
-            })
-    }
-
-    private fun getUsernameFromPreferences(): String {
-        val prefs: SharedPreferences = getSharedPreferences("user_session", MODE_PRIVATE)
-        return prefs.getString("username", "") ?: ""
+            override fun onFailure(call: Call<EvaluateResponse>, t: Throwable) {
+                btnEvaluate.isEnabled = true
+                progressBar.visibility = View.GONE
+                textEvaluationResult.text = "Échec : ${t.message}"
+            }
+        })
     }
 
     private fun deleteScan(scanId: String) {
@@ -174,6 +189,7 @@ class EvaluationActivity : AppCompatActivity() {
                     btnDeleteScan.visibility = Button.GONE
                     textScanResult.text = ""
                     scannedProduct = null
+                    imageViewProduct.setImageDrawable(null)
                 }
             }
 
